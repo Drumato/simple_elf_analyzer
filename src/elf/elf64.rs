@@ -5,12 +5,14 @@ type Elf64Xword = u64;
 //type Elf64Sxword = i64;
 type Elf64Addr = u64;
 type Elf64Off = u64;
-//type Elf64Section = u16;
+type Elf64Section = u16;
 type EIDENT = u128;
 struct ELF {
     ehdr: Ehdr,
     shdrs: Vec<Shdr>,
     phdrs: Option<Vec<Phdr>>,
+    symtab: Vec<Sym>,
+    strtab: Vec<u8>,
 }
 
 impl ELF {
@@ -18,12 +20,42 @@ impl ELF {
         let ehdr: Ehdr = Ehdr::new_unsafe(binary[0..64].to_vec());
         let shdrs: Vec<Shdr> = ELF::build_shdrs(&ehdr, binary[ehdr.e_shoff as usize..].to_vec());
         let phdrs: Vec<Phdr> = ELF::build_phdrs(&ehdr, binary[ehdr.e_phoff as usize..].to_vec());
-
+        let (symtab_vec, sym_number) = ELF::get_section(&ehdr, &shdrs, binary.to_vec(), ".symtab");
+        let (strtab, _) = ELF::get_section(&ehdr, &shdrs, binary, ".strtab");
+        let symtab = ELF::build_symtab(symtab_vec, sym_number);
+        eprintln!("length -> {}", symtab.len());
         ELF {
             ehdr: ehdr,
             shdrs: shdrs,
             phdrs: if 0 < phdrs.len() { Some(phdrs) } else { None },
+            symtab: symtab,
+            strtab: strtab,
         }
+    }
+    fn get_section(
+        ehdr: &Ehdr,
+        shdrs: &Vec<Shdr>,
+        binary: Vec<u8>,
+        secname: &str,
+    ) -> (Vec<u8>, u64) {
+        let mut section = Vec::new();
+        let mut sh_entsize = 0;
+        let offset = shdrs[ehdr.e_shstrndx as usize].sh_offset as usize;
+        let shstrtab =
+            binary[offset..offset + shdrs[ehdr.e_shstrndx as usize].sh_size as usize].to_vec();
+        for shdr in shdrs.iter() {
+            if shdr.sh_offset == 0 {
+                continue;
+            }
+            if get_string_with_null_terminated(shstrtab[shdr.sh_name as usize..].to_vec())
+                == secname
+            {
+                section = binary[shdr.sh_offset as usize..(shdr.sh_offset + shdr.sh_size) as usize]
+                    .to_vec();
+                sh_entsize = shdr.sh_entsize;
+            }
+        }
+        (section, sh_entsize)
     }
     fn build_shdrs(ehdr: &Ehdr, binary: Vec<u8>) -> Vec<Shdr> {
         let mut shdrs: Vec<Shdr> = Vec::new();
@@ -43,6 +75,13 @@ impl ELF {
         }
         phdrs
     }
+    fn build_symtab(v: Vec<u8>, entsize: u64) -> Vec<Sym> {
+        let mut symtab: Vec<Sym> = Vec::new();
+        for i in 0..entsize {
+            symtab.push(Sym::new_unsafe(v[(i * Sym::size()) as usize..].to_vec()));
+        }
+        symtab
+    }
     fn dump(&self) {
         self.ehdr.dump();
         for shdr in self.shdrs.iter() {
@@ -52,6 +91,9 @@ impl ELF {
             for phdr in phdr_vec.iter() {
                 phdr.dump();
             }
+        }
+        for sym in &self.symtab {
+            sym.dump(self.strtab.to_vec());
         }
     }
 }
@@ -152,7 +194,45 @@ impl Phdr {
         eprintln!("align -> {}", self.p_align);
     }
 }
+#[repr(C)]
+struct Sym {
+    st_name: Elf64Word,
+    st_info: u8,
+    st_other: u8,
+    st_shndx: Elf64Section,
+    st_value: Elf64Addr,
+    st_size: Elf64Xword,
+}
 
+impl Sym {
+    fn new_unsafe(binary: Vec<u8>) -> Sym {
+        unsafe { std::ptr::read(binary.as_ptr() as *const Sym) }
+    }
+    fn size() -> u64 {
+        24
+    }
+    fn dump(&self, strtab: Vec<u8>) {
+        eprintln!(
+            "name -> {}",
+            get_string_with_null_terminated(strtab[self.st_name as usize..].to_vec())
+        );
+        eprintln!("info -> {}", self.st_info);
+        eprintln!("other -> {}", self.st_other);
+        eprintln!("shndx -> {}", self.st_shndx);
+        eprintln!("value -> 0x{:x}", self.st_value);
+        eprintln!("size -> {}", self.st_size);
+    }
+}
+
+fn get_string_with_null_terminated(binary: Vec<u8>) -> String {
+    let st = String::from_utf8(
+        binary
+            .into_iter()
+            .take_while(|c| c != &0x00)
+            .collect::<Vec<u8>>(),
+    );
+    st.unwrap()
+}
 pub fn dump_elf_in_detail(binary: Vec<u8>) {
     let elf_file: ELF = ELF::new(binary);
     elf_file.dump();
